@@ -4,7 +4,6 @@ import os
 
 def generate_launch_description():
     pkg_name = 'PArobot_setup'
-    home = os.path.expanduser('~')
 
     camera_node = Node(
         package=pkg_name,
@@ -35,7 +34,6 @@ def generate_launch_description():
         }]
     )
 
-    # --- Follower Node ---
     follower_node = Node(
         package=pkg_name,
         executable='follower_node',
@@ -43,17 +41,9 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'image_width': 640,
-            'turn_gain': 70.0,
-            'forward_speed': 0.6,
-            'dead_zone_ratio': 0.2,
-            'turn_sensitivity': 0.9,
-            'accel_rate': 0.8,
-            'follow_dist_near': 0.8,
-            'follow_dist_far': 1.3,
         }]
     )
 
-    # --- Motor Node ---
     motor_node = Node(
         package=pkg_name,
         executable='motor_node',
@@ -61,7 +51,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # --- Main Supervisor Node ---
     main_node = Node(
         package=pkg_name,
         executable='main_node',
@@ -69,8 +58,13 @@ def generate_launch_description():
         output='screen'
     )
 
-    # --- Optional: YDLIDAR driver (only if available) ---
-    # NOTE: this assumes you have sourced the ydlidar_ros2_ws before launch
+    rf_node = Node(
+        package=pkg_name,
+        executable='rf_remote_node',
+        name='rf_remote_node',
+        output='screen'
+    )
+
     lidar_launch = Node(
         package='ydlidar_ros2_driver',
         executable='ydlidar_ros2_driver_node',
@@ -78,20 +72,37 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'port': '/dev/ttyUSB0',
-            'baudrate': 115200,
             'frame_id': 'laser_frame',
-            'frequency': 6.0,
+            'ignore_array': "",
+            'baudrate': 115200,
+            'lidar_type': 1,
+            'device_type': 0,
+            'sample_rate': 3,
+            'abnormal_check_count': 4,
+            'fixed_resolution': True,
+            'reversion': False,
+            'inverted': False,
+            'auto_reconnect': True,
+            'isSingleChannel': True,
+            'intensity_bit': 0,
+            'intensity': False,
+            'support_motor_dtr': True,
+            'angle_max': 180.0,
+            'angle_min': -180.0,
             'range_max': 12.0,
             'range_min': 0.1,
+            'frequency': 10.0,
+            'invalid_range_is_inf': False,
+            'debug': False,
         }]
     )
 
-    # Return full launch description
     return LaunchDescription([
-        # lidar_launch,   # uncomment later when you have LiDAR plugged in
+        lidar_launch,
         camera_node,
         detector_node,
         follower_node,
         motor_node,
         main_node,
+        rf_node,
     ])
