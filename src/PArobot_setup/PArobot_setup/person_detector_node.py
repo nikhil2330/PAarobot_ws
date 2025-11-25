@@ -12,12 +12,12 @@ from cv_bridge import CvBridge
 import numpy as np
 import cv2
 
-# ---- CONSTANTS (from your script) ----
-DETECTION_THRESHOLD   = 0.59
+DETECTION_THRESHOLD   = 0.5
 LOCK_VISIBLE_TIME_SEC = 2.0
-MIN_HIST_FRAMES       = 10
+MIN_HIST_FRAMES       = 5
 COLOR_SIM_THRESH      = 0.5
 HIST_BINS             = 16
+MAX_TRACK_LOST_FRAMES = 5
 
 
 class PersonDetectorNode(Node):
@@ -43,7 +43,11 @@ class PersonDetectorNode(Node):
 
         self.center_pub = self.create_publisher(Float32, "/person/center_x", 10)
         self.bbox_pub   = self.create_publisher(Float32MultiArray, "/person/bbox", 10)
-        self.debug_img_pub = self.create_publisher(Image, "/person/debug_image", 10)
+
+        # 🔹 NEW: status topics for MainNode
+        self.lock_pub      = self.create_publisher(Bool,    "/person/locked",    10)
+        self.det_score_pub = self.create_publisher(Float32, "/person/det_score", 10)
+        self.sim_score_pub = self.create_publisher(Float32, "/person/sim_score", 10)
 
         # ------------------- LABELS -------------------
         self.labels = []
@@ -94,7 +98,7 @@ class PersonDetectorNode(Node):
         # ------------------- RF STATE -------------------
         self.robot_enabled = False
 
-        # ------------------- LOCK STATE (as in script) -------------------
+        # ------------------- CANDIDATE / LOCK STATE -------------------
         self.candidate_active          = False
         self.candidate_bbox            = None
         self.candidate_hist_accum      = None
@@ -107,27 +111,36 @@ class PersonDetectorNode(Node):
         self.tracked_hist        = None
         self.tracked_score       = 0.0
         self.tracked_lost_frames = 0
-        self.max_tracked_lost_frames = 30
 
-    # ------------------- RF (reset on START) -------------------
+        # For similarity + logging throttling
+        self.last_sim_score = None
+        self.last_log_time  = 0.0
+        self.log_period     = 1.0  # seconds
+
+    # ------------------- RF START/STOP -------------------
     def rf_cb(self, msg: Bool):
         prev = self.robot_enabled
         self.robot_enabled = msg.data
-        if self.robot_enabled and not prev:
-            # mimic your "new start" reset of candidate + tracking
-            self.candidate_active          = False
-            self.candidate_bbox            = None
-            self.candidate_hist_accum      = None
-            self.candidate_hist_count      = 0
-            self.candidate_visible_time    = 0.0
-            self.candidate_visible_start_t = None
 
-            self.tracked_active      = False
-            self.tracked_bbox        = None
-            self.tracked_hist        = None
-            self.tracked_score       = 0.0
-            self.tracked_lost_frames = 0
-            self.get_logger().info("[RF] New Start → resetting lock state")
+        if self.robot_enabled and not prev:
+            self._reset_lock_state()
+            self.get_logger().info("[RF] New Start → resetting lock state (candidate + tracked)")
+
+    def _reset_lock_state(self):
+        self.candidate_active          = False
+        self.candidate_bbox            = None
+        self.candidate_hist_accum      = None
+        self.candidate_hist_count      = 0
+        self.candidate_visible_time    = 0.0
+        self.candidate_visible_start_t = None
+
+        self.tracked_active      = False
+        self.tracked_bbox        = None
+        self.tracked_hist        = None
+        self.tracked_score       = 0.0
+        self.tracked_lost_frames = 0
+
+        self.last_sim_score = None
 
     # ------------------- HISTOGRAM HELPERS -------------------
     def compute_color_hist(self, frame_rgb, bbox):
@@ -172,7 +185,7 @@ class PersonDetectorNode(Node):
             [0, 1],
             None,
             [HIST_BINS, HIST_BINS],
-            [0, 180, 0, 256]
+            [0, 180, 0, 256],
         )
         cv2.normalize(hist, hist)
         return hist.astype(np.float32)
@@ -181,14 +194,14 @@ class PersonDetectorNode(Node):
     def hist_correlation(hist1, hist2):
         return float(cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL))
 
-    # ------------------- TFLITE + LOCK + PUBLISH -------------------
+    # ------------------- MAIN IMAGE CALLBACK -------------------
     def image_cb(self, msg: Image):
         frame_bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        imH, imW = frame_bgr.shape[:2]
+        imH, imW = frame_rgb.shape[:2]
         now = time.time()
 
-        # 1) TFLite inference → list of people
+        # 1) TFLite inference
         people = []
         try:
             inp = cv2.resize(frame_rgb, (self.w, self.h))
@@ -206,8 +219,12 @@ class PersonDetectorNode(Node):
             for i, s in enumerate(scores):
                 if self.score_thresh < s <= 1.0:
                     cls_id = int(classes[i])
-                    cls_name = self.labels[cls_id] if (self.labels and cls_id < len(self.labels)) else "person"
-                    if cls_name == "person":
+                    label = (
+                        self.labels[cls_id]
+                        if (self.labels and cls_id < len(self.labels))
+                        else "obj"
+                    )
+                    if label == "person":
                         ymin = int(max(0,   boxes[i][0] * imH))
                         xmin = int(max(0,   boxes[i][1] * imW))
                         ymax = int(min(imH, boxes[i][2] * imH))
@@ -216,14 +233,9 @@ class PersonDetectorNode(Node):
         except Exception as e:
             self.get_logger().error(f"TFLite inference error: {e}")
 
-        for det in people:
-            x1, y1, x2, y2 = det["bbox"]
-            cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 255, 255), 1)
-
-        state_str = "NO_PERSON"
         candidate_visible_this_frame = False
 
-        # 2) Candidate / Lock logic (EXACT same as your script)
+        # 2) Candidate / Lock logic (one-shot)
         if not self.tracked_active:
             if not self.candidate_active:
                 if people:
@@ -234,9 +246,7 @@ class PersonDetectorNode(Node):
                     self.candidate_visible_time = 0.0
                     self.candidate_visible_start_t = None
                     self.candidate_active = True
-                    state_str = "CANDIDATE_STARTED"
-                else:
-                    state_str = "WAITING_FOR_PERSON"
+                    self.get_logger().info("Candidate person selected for locking.")
             else:
                 if people:
                     best = max(people, key=lambda d: d["score"])
@@ -252,12 +262,10 @@ class PersonDetectorNode(Node):
                             self.candidate_hist_count += 1
 
                     candidate_visible_this_frame = True
-                    state_str = "CANDIDATE_VISIBLE"
                 else:
                     candidate_visible_this_frame = False
                     self.candidate_visible_start_t = None
                     self.candidate_visible_time = 0.0
-                    state_str = "CANDIDATE_NOT_VISIBLE"
 
                 if candidate_visible_this_frame:
                     if self.candidate_visible_start_t is None:
@@ -265,10 +273,6 @@ class PersonDetectorNode(Node):
                         self.candidate_visible_time = 0.0
                     else:
                         self.candidate_visible_time = now - self.candidate_visible_start_t
-
-                if self.candidate_bbox is not None:
-                    x1, y1, x2, y2 = self.candidate_bbox
-                    cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
                 if (
                     candidate_visible_this_frame
@@ -283,8 +287,14 @@ class PersonDetectorNode(Node):
                     self.tracked_score = 0.0
                     self.tracked_active = True
                     self.tracked_lost_frames = 0
-                    state_str = "LOCKED"
+                    self.last_sim_score = None
+
+                    self.get_logger().info(
+                        "LOCKED onto person (one-shot). Will NEVER re-lock another person "
+                        "until RF is toggled OFF→ON."
+                    )
         else:
+            # 3) After lock
             best_match = None
             best_sim = None
 
@@ -294,9 +304,11 @@ class PersonDetectorNode(Node):
                     hist = self.compute_color_hist(frame_rgb, bbox)
                     if hist is None:
                         continue
+
                     color_sim = self.hist_correlation(self.tracked_hist, hist)
                     if color_sim < COLOR_SIM_THRESH:
                         continue
+
                     if (best_sim is None) or (color_sim > best_sim):
                         best_sim = color_sim
                         best_match = det
@@ -305,57 +317,55 @@ class PersonDetectorNode(Node):
                 self.tracked_bbox = best_match["bbox"]
                 self.tracked_score = best_match["score"]
                 self.tracked_lost_frames = 0
-                state_str = f"LOCKED (sim={best_sim:.2f})"
+                self.last_sim_score = best_sim
             else:
                 self.tracked_lost_frames += 1
-                state_str = f"LOCKED_LOST ({self.tracked_lost_frames})"
-                if self.tracked_lost_frames > self.max_tracked_lost_frames:
-                    self.get_logger().warn("Tracked person lost – resetting lock.")
-                    self.tracked_active = False
+                if self.tracked_lost_frames > MAX_TRACK_LOST_FRAMES:
                     self.tracked_bbox = None
-                    self.tracked_hist = None
-                    self.candidate_active = False
-                    self.candidate_bbox = None
+                self.last_sim_score = None
 
-            if self.tracked_bbox is not None:
-                x1, y1, x2, y2 = self.tracked_bbox
-                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                label = f"LOCKED score={self.tracked_score:.2f}"
-                cv2.putText(
-                    frame_bgr,
-                    label,
-                    (x1, max(0, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                )
-
-        # 3) Publish center_x and bbox ONLY when lock is active
+        # 4) Publish center_x and bbox ONLY when we have a valid locked bbox
         if self.tracked_active and self.tracked_bbox is not None:
             xmin, ymin, xmax, ymax = self.tracked_bbox
             cx = (xmin + xmax) / 2.0
 
             self.center_pub.publish(Float32(data=float(cx)))
             arr = Float32MultiArray()
-            arr.data = [float(xmin), float(ymin), float(xmax), float(ymax), float(self.tracked_score)]
+            arr.data = [
+                float(xmin),
+                float(ymin),
+                float(xmax),
+                float(ymax),
+                float(self.tracked_score),
+            ]
             self.bbox_pub.publish(arr)
+            has_bbox = True
         else:
             self.center_pub.publish(Float32(data=-1.0))
             self.bbox_pub.publish(Float32MultiArray(data=[]))
+            has_bbox = False
 
-        cv2.putText(
-            frame_bgr,
-            f"STATE: {state_str}",
-            (30, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-        )
+        # 🔹 5) Publish lock / scores for MainNode
+        self.lock_pub.publish(Bool(data=self.tracked_active))
 
-        dbg_msg = self.bridge.cv2_to_imgmsg(frame_bgr, encoding="bgr8")
-        self.debug_img_pub.publish(dbg_msg)
+        det_val = float(self.tracked_score) if (self.tracked_active and has_bbox) else -1.0
+        self.det_score_pub.publish(Float32(data=det_val))
+
+        sim_val = float(self.last_sim_score) if self.last_sim_score is not None else -1.0
+        self.sim_score_pub.publish(Float32(data=sim_val))
+
+        # 🔹 Optional: keep detector’s own logging throttled
+        # if now - self.last_log_time >= self.log_period:
+        #     self.last_log_time = now
+        #     sim_str = f"{sim_val:.2f}" if sim_val >= 0.0 else "N/A"
+        #     det_str = f"{det_val:.2f}" if det_val >= 0.0 else "N/A"
+        #     self.get_logger().info(
+        #         f"[STATE] locked={self.tracked_active} "
+        #         f"bbox={'yes' if has_bbox else 'no'} "
+        #         f"det_score={det_str} sim_score={sim_str} "
+        #         f"cand_active={self.candidate_active} "
+        #         f"cand_vis_time={self.candidate_visible_time:.2f}s"
+        #     )
 
 
 def main(args=None):

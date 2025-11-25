@@ -14,7 +14,7 @@ INV_RIGHT = False
 class MotorNode(Node):
     def __init__(self):
         super().__init__("motor_node")
-        self.get_logger().info("Motor Node Started (BTS7960 tank drive, EXACT main.py mapping)")
+        self.get_logger().info("Motor Node Started (BTS7960 tank drive, EXACT main7.py mapping)")
 
         # Subscribe to velocity commands
         self.create_subscription(Twist, "/cmd_vel", self.cmd_callback, 10)

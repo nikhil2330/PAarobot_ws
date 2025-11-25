@@ -11,9 +11,8 @@ from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 
 import numpy as np
-import matplotlib.pyplot as plt
 
-# ---- CONSTANTS from your script ----
+# ---- CONSTANTS from main7.py ----
 CAMERA_FOV_DEG = 60.0
 CAMERA_FOV_RAD = math.radians(CAMERA_FOV_DEG)
 
@@ -21,8 +20,8 @@ TURN_SPEED_TARGET    = 25.0
 FORWARD_SPEED_TARGET = 30.0
 CENTER_DEADZONE      = 0.10
 
-ACCEL_LINEAR = 200.0
-ACCEL_TURN   = 200.0
+ACCEL_LINEAR = 100.0
+ACCEL_TURN   = 100.0
 
 FOLLOW_NEAR = 0.8
 FOLLOW_FAR  = 1.5
@@ -43,7 +42,7 @@ class FollowerNode(Node):
     def __init__(self):
         super().__init__("follower_node")
 
-        # Parameters
+        # Parameters (image width for center_x normalisation)
         self.declare_parameter("image_width", 640)
         self.imW = int(self.get_parameter("image_width").value)
 
@@ -56,8 +55,6 @@ class FollowerNode(Node):
 
         self.front_distance = None
         self.aim_angle      = 0.0
-        self.lidar_xs       = []
-        self.lidar_ys       = []
 
         # ROS I/O
         self.create_subscription(Float32, "/person/center_x", self.center_cb, 10)
@@ -72,23 +69,12 @@ class FollowerNode(Node):
 
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
 
-        # Plot setup (LiDAR cone) – same as your script
-        plt.ion()
-        self.fig, self.ax = plt.subplots()
-        self.ax.set_aspect("equal")
-        self.ax.set_xlim(-1.5, 1.5)
-        self.ax.set_ylim(0.0, 3.0)
-        self.ax.grid(True)
-        (self.lidar_points_plot,) = self.ax.plot([], [], ".", markersize=3, label="LiDAR points")
-        self.ax.plot(0, 0, "ro", markersize=6, label="Robot")
-        self.fov_fill = self.ax.fill([], [], "orange", alpha=0.2, label="LiDAR cone")[0]
-        (self.fov_left_line,) = self.ax.plot([], [], "orange", linewidth=1.5)
-        (self.fov_right_line,) = self.ax.plot([], [], "orange", linewidth=1.5)
-        self.ax.legend(loc="upper right")
+        # Timer for control loop (~33 Hz, same spirit as while loop)
+        self.timer = self.create_timer(0.03, self.control_loop)
+        self.get_logger().info("FollowerNode (EXACT main7.py motion) started")
 
-        # Timer for control loop
-        self.timer = self.create_timer(0.03, self.control_loop)  # ~33 Hz
-        self.get_logger().info("FollowerNode (EXACT main.py motion) started")
+        self.last_log_time = time.time()
+        self.log_period = 1.0 
 
     # ---------- Callbacks ----------
     def rf_cb(self, msg: Bool):
@@ -110,7 +96,7 @@ class FollowerNode(Node):
             vals = vals[(vals > RANGE_MIN) & (vals <= RANGE_MAX)]
             return vals
 
-        # front cone around self.aim_angle
+        # front cone around current aim_angle
         front_mask = (angs >= (self.aim_angle - CONE_HALF_W)) & (angs <= (self.aim_angle + CONE_HALF_W))
         front_vals = valid(front_mask)
         if front_vals.size > 0:
@@ -118,48 +104,7 @@ class FollowerNode(Node):
         else:
             self.front_distance = None
 
-        # points for visualization
-        xs, ys = [], []
-        for angle, r in zip(angs, ranges):
-            if RANGE_MIN < r <= RANGE_MAX and (self.aim_angle - CONE_HALF_W) <= angle <= (self.aim_angle + CONE_HALF_W):
-                if r <= PLOT_MAX_RANGE:
-                    xs.append(r * math.sin(angle))
-                    ys.append(r * math.cos(angle))
-        self.lidar_xs = xs
-        self.lidar_ys = ys
-
-    # ---------- Plot update ----------
-    def update_plot(self, detected: bool):
-        xs, ys = self.lidar_xs, self.lidar_ys
-        self.lidar_points_plot.set_data(xs, ys)
-
-        cone = CONE_HALF_W
-        max_r = PLOT_MAX_RANGE
-
-        left_x = [0, max_r * math.sin(self.aim_angle - cone)]
-        left_y = [0, max_r * math.cos(self.aim_angle - cone)]
-        right_x = [0, max_r * math.sin(self.aim_angle + cone)]
-        right_y = [0, max_r * math.cos(self.aim_angle + cone)]
-
-        cone_fill_x = [0,
-                       max_r * math.sin(self.aim_angle - cone),
-                       max_r * math.sin(self.aim_angle + cone)]
-        cone_fill_y = [0,
-                       max_r * math.cos(self.aim_angle - cone),
-                       max_r * math.cos(self.aim_angle + cone)]
-        self.fov_fill.set_xy(np.column_stack((cone_fill_x, cone_fill_y)))
-
-        color = "green" if detected else "red"
-        self.fov_fill.set_facecolor(color)
-        self.fov_left_line.set_data(left_x, left_y)
-        self.fov_right_line.set_data(right_x, right_y)
-        self.fov_left_line.set_color(color)
-        self.fov_right_line.set_color(color)
-
-        self.fig.canvas.draw()
-        self.fig.canvas.flush_events()
-
-    # ---------- Control loop (EXACT logic) ----------
+    # ---------- Control loop (EXACT logic of follow part) ----------
     def control_loop(self):
         now = time.time()
         dt = now - self.last_time
@@ -171,7 +116,6 @@ class FollowerNode(Node):
 
         target_forward_cmd = 0.0
         target_turn_cmd = 0.0
-        offset_norm = 0.0
 
         if has_lock:
             frame_center_x = self.imW / 2.0
@@ -185,8 +129,10 @@ class FollowerNode(Node):
                 target_turn_cmd = -TURN_SPEED_TARGET
             else:
                 target_turn_cmd = 0.0
+        else:
+            offset_norm = 0.0
 
-        # front_distance was updated in scan_cb with current aim_angle
+        # front_distance is updated in scan_cb with current aim_angle
         if has_lock and (self.front_distance is not None):
             if self.front_distance > FOLLOW_FAR:
                 target_forward_cmd = +FORWARD_SPEED_TARGET
@@ -201,7 +147,7 @@ class FollowerNode(Node):
             target_forward_cmd = 0.0
             target_turn_cmd = 0.0
 
-        # RF gating and smoothing
+        # RF gating and smoothing (mirrors main7 while loop)
         if self.robot_enabled:
             self.forward_cmd = smooth(self.forward_cmd, target_forward_cmd, ACCEL_LINEAR, dt)
             self.turn_cmd    = smooth(self.turn_cmd,    target_turn_cmd,   ACCEL_TURN,   dt)
@@ -237,20 +183,20 @@ class FollowerNode(Node):
                 else:
                     motion_str = "STOP"
 
-            self.get_logger().info(
-                f"[MOTION] {motion_str} | "
-                f"dist={self.front_distance if self.front_distance is not None else 'None'} | "
-                f"L={left:.1f} R={right:.1f}"
-            )
+            # now = time.time()
+            # if (now - self.last_log_time) >= self.log_period:
+            #     self.last_log_time = now
+            #     self.get_logger().info(
+            #         f"[MOTION] {motion_str} | "
+            #         f"dist={self.front_distance if self.front_distance is not None else 'None'} | "
+            #         f"L={left:.1f} R={right:.1f}"
+            #     )
         else:
-            # RF STOP
+            # RF STOP: same as main7 (forward_cmd, turn_cmd → 0 and motors stopped via MotorNode)
             self.forward_cmd = 0.0
             self.turn_cmd    = 0.0
             twist = Twist()
             self.cmd_pub.publish(twist)
-
-        # Update LiDAR plot
-        self.update_plot(has_lock)
 
 
 def main(args=None):
