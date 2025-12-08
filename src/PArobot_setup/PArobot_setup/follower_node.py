@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import math
 import time
 
@@ -16,15 +15,15 @@ import numpy as np
 CAMERA_FOV_DEG = 60.0
 CAMERA_FOV_RAD = math.radians(CAMERA_FOV_DEG)
 
-TURN_SPEED_TARGET    = 25.0
-FORWARD_SPEED_TARGET = 30.0
+TURN_SPEED_TARGET    = 30.0
+FORWARD_SPEED_TARGET = 35.0
 CENTER_DEADZONE      = 0.10
 
 ACCEL_LINEAR = 100.0
 ACCEL_TURN   = 100.0
 
-FOLLOW_NEAR = 0.8
-FOLLOW_FAR  = 1.5
+FOLLOW_NEAR = 1.1
+FOLLOW_FAR  = 1.6
 
 RANGE_MIN      = 0.15
 RANGE_MAX      = 5.00

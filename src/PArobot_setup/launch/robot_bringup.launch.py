@@ -30,7 +30,7 @@ def generate_launch_description():
             ),
             'graph': 'detect.tflite',
             'labels': 'labelmap.txt',
-            'score_thresh': 0.59,
+            'score_thresh': 0.5,
         }]
     )
 
@@ -70,14 +70,14 @@ def generate_launch_description():
         executable='ydlidar_ros2_driver_node',
         name='ydlidar_ros2_driver_node',
         output='screen',
-        parameters=[{
+            parameters=[{
             'port': '/dev/ttyUSB0',
             'frame_id': 'laser_frame',
             'ignore_array': "",
             'baudrate': 115200,
             'lidar_type': 1,
             'device_type': 0,
-            'sample_rate': 3,
+            'sample_rate': 4,          # match main7.py
             'abnormal_check_count': 4,
             'fixed_resolution': True,
             'reversion': False,
@@ -89,9 +89,9 @@ def generate_launch_description():
             'support_motor_dtr': True,
             'angle_max': 180.0,
             'angle_min': -180.0,
-            'range_max': 12.0,
-            'range_min': 0.1,
-            'frequency': 10.0,
+            'range_max': 5.0,          # match PLOT_MAX_RANGE / RANGE_MAX
+            'range_min': 0.15,         # match RANGE_MIN
+            'frequency': 6.0,          # match ScanFrequency
             'invalid_range_is_inf': False,
             'debug': False,
         }]

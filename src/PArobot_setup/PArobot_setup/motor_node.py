@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -25,9 +24,9 @@ class MotorNode(Node):
 
         # ----------------- BTS7960 PIN MAP (BOARD numbering) -----------------
         # Left BTS7960
-        self.l_rpwm = PWMLED("BOARD33", frequency=200)  # GPIO13 -> RPWM (Left)
-        self.l_lpwm = PWMLED("BOARD31", frequency=200)  # GPIO6  -> LPWM (Left)
-        self.l_en   = LED("BOARD29")                    # GPIO5  -> R_EN & L_EN
+        self.l_rpwm = PWMLED("BOARD16", frequency=200)  # GPIO13 -> RPWM (Left)
+        self.l_lpwm = PWMLED("BOARD18", frequency=200)  # GPIO6  -> LPWM (Left)
+        self.l_en   = LED("BOARD22")                    # GPIO5  -> R_EN & L_EN
 
         # Right BTS7960
         self.r_rpwm = PWMLED("BOARD35", frequency=200)  # GPIO19 -> LPWM (Right)
