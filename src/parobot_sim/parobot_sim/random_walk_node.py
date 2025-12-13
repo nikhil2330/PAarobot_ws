@@ -7,6 +7,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
+from std_srvs.srv import SetBool   # <- NEW
 
 
 class RandomWalkNode(Node):
@@ -16,7 +17,7 @@ class RandomWalkNode(Node):
         # Publish velocity to diff drive
         self.cmd_pub = self.create_publisher(
             Twist,
-            "/cmd_vel",
+            "/cmd_vel_raw",
             10
         )
 
@@ -43,15 +44,41 @@ class RandomWalkNode(Node):
 
         # Obstacle avoidance params
         self.front_obstacle_threshold = 0.4  # m: start avoiding when closer than this
-        self.avoid_turn_ticks = 10          # how many timer ticks to keep turning ~ 1.5s @ 0.1s
+        self.avoid_turn_ticks = 10          # how many timer ticks to keep turning
         self.mode = "wander"                # "wander" or "avoid"
         self.avoid_direction = None         # "left" or "right"
         self.avoid_ticks_left = 0
+
+        # NEW: enabled flag
+        self.enabled = True
+
+        # NEW: service to enable / disable random walk
+        self.enable_srv = self.create_service(
+            SetBool,
+            "~/set_enabled",          # <-- note the tilde
+            self.set_enabled_cb,
+        )
 
         self.timer = self.create_timer(0.1, self.tick)
         self.get_logger().info(
             "RandomWalkNode started (random wander + lidar avoidance with side choice)"
         )
+
+    # ---------- Service callback ----------
+
+    def set_enabled_cb(self, request, response):
+        prev = self.enabled
+        self.enabled = request.data
+
+        if prev and not self.enabled:
+            # publish stop ONCE so robot halts, then stop publishing forever
+            self.cmd_pub.publish(Twist())
+
+        state = "ENABLED" if self.enabled else "DISABLED"
+        self.get_logger().info(f"[mode] RandomWalk {state} via service call")
+        response.success = True
+        response.message = state
+        return response
 
     # ---------- Callbacks ----------
 
@@ -124,7 +151,6 @@ class RandomWalkNode(Node):
         Decide which way to turn and set avoidance state for a fixed duration.
         """
         # Choose side with more space (larger min distance wins).
-        # If right is None or left has more room, turn left. Otherwise turn right.
         if right_min is None or (left_min is not None and left_min > right_min):
             self.avoid_direction = "left"
         else:
@@ -133,10 +159,14 @@ class RandomWalkNode(Node):
         self.mode = "avoid"
         self.avoid_ticks_left = self.avoid_turn_ticks
 
+        fm = front_min if front_min is not None else -1.0
+        lm = left_min if left_min is not None else -1.0
+        rm = right_min if right_min is not None else -1.0
+
         self.get_logger().info(
-            f"[avoid] Obstacle ahead at {front_min:.2f} m, "
+            f"[avoid] Obstacle ahead at {fm:.2f} m, "
             f"turning {self.avoid_direction.upper()} "
-            f"(left_min={left_min}, right_min={right_min})"
+            f"(left_min={lm:.2f}, right_min={rm:.2f})"
         )
 
     def apply_avoidance(self, twist: Twist):
@@ -148,9 +178,6 @@ class RandomWalkNode(Node):
         elif self.avoid_direction == "right":
             twist.angular.z = -self.turn_speed
 
-        # Optional: back up a bit while turning
-        # twist.linear.x = -0.05
-
         self.avoid_ticks_left -= 1
         if self.avoid_ticks_left <= 0:
             self.mode = "wander"
@@ -161,6 +188,11 @@ class RandomWalkNode(Node):
 
     def tick(self):
         twist = Twist()
+
+        # If disabled: publish zero and bail
+        if not self.enabled:
+            # ensures robot stops when you flip to Nav2 mode
+            return
 
         # Use lidar to decide whether to enter avoidance mode
         front_min = None

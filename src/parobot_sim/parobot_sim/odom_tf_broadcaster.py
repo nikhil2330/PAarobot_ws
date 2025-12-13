@@ -11,24 +11,26 @@ class OdomTFBroadcaster(Node):
     def __init__(self):
         super().__init__("odom_tf_broadcaster")
 
-        self.tf_broadcaster = TransformBroadcaster(self)
+        # TF broadcaster
+        self.br = TransformBroadcaster(self)
 
-        self.create_subscription(
+        # Subscribe to /odom coming from ros_gz_bridge
+        self.odom_sub = self.create_subscription(
             Odometry,
             "/odom",
-            self.odom_cb,
+            self.odom_callback,
             10
         )
 
         self.get_logger().info("OdomTFBroadcaster started (publishing odom -> base_link TF)")
 
-    def odom_cb(self, msg: Odometry):
+    def odom_callback(self, msg: Odometry):
+        # Build transform directly from the Odometry message
         t = TransformStamped()
+        t.header.stamp = msg.header.stamp  # IMPORTANT: use odom timestamp (sim time)
+        t.child_frame_id = "base_link"
+        t.header.frame_id = "odom"
 
-        # Use the odom message frames directly
-        t.header.stamp = msg.header.stamp
-        t.header.frame_id = msg.header.frame_id       # usually "odom"
-        t.child_frame_id = msg.child_frame_id         # usually "base_link"
 
         t.transform.translation.x = msg.pose.pose.position.x
         t.transform.translation.y = msg.pose.pose.position.y
@@ -36,20 +38,15 @@ class OdomTFBroadcaster(Node):
 
         t.transform.rotation = msg.pose.pose.orientation
 
-        self.tf_broadcaster.sendTransform(t)
+        self.br.sendTransform(t)
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = OdomTFBroadcaster()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == "__main__":
